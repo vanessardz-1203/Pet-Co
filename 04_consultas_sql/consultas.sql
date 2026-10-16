@@ -1,0 +1,87 @@
+-- =====================================================================
+-- PET&CO  |  PETCO_DATAMART  |  Actividad Unidad 3
+-- 03_consulta_top5_rentabilidad.sql
+-- Motor: MySQL 8.0 (Workbench 8.0 CE)
+--
+-- PREGUNTA DE NEGOCIO
+--   Cinco productos más rentables de cada región en Q2 2026 y cómo cambió
+--   su rentabilidad respecto a Q1 2026.
+--
+-- REGLAS APLICADAS
+--   * Rentabilidad = SUM(margen). El margen ya descuenta el descuento y el costo.
+--   * Región = DIM_TIENDA.region de la tienda que SURTE (tienda_surtido_key).
+--   * Q1 = anio 2026, trimestre 1 (01-ene a 31-mar). Q2 = anio 2026, trimestre 2 (01-abr a 30-jun).
+--   * Top 5 solo con el margen de Q2; empates resueltos por producto_key ascendente.
+--   * Sin devoluciones/cancelaciones (el modelo no tiene campos para identificarlas).
+-- =====================================================================
+
+USE PETCO_DATAMART;
+
+-- INICIO_CONSULTA
+WITH margen_q2 AS (
+    -- Margen acumulado por región y producto en el periodo actual (Q2 2026)
+    SELECT ti.region,
+           f.producto_key,
+           SUM(f.margen) AS margen_q2
+    FROM FACT_VENTAS f
+    JOIN DIM_TIEMPO  t  ON t.fecha_key  = f.fecha_key
+    JOIN DIM_TIENDA  ti ON ti.tienda_key = f.tienda_surtido_key
+    WHERE t.anio = 2026
+      AND t.trimestre = 2
+    GROUP BY ti.region, f.producto_key
+),
+margen_q1 AS (
+    -- Margen acumulado por región y producto en el periodo anterior (Q1 2026)
+    SELECT ti.region,
+           f.producto_key,
+           SUM(f.margen) AS margen_q1
+    FROM FACT_VENTAS f
+    JOIN DIM_TIEMPO  t  ON t.fecha_key  = f.fecha_key
+    JOIN DIM_TIENDA  ti ON ti.tienda_key = f.tienda_surtido_key
+    WHERE t.anio = 2026
+      AND t.trimestre = 1
+    GROUP BY ti.region, f.producto_key
+),
+ranking_q2 AS (
+    -- Posición de cada producto dentro de su región según el margen de Q2
+    SELECT region,
+           producto_key,
+           margen_q2,
+           ROW_NUMBER() OVER (
+               PARTITION BY region
+               ORDER BY margen_q2 DESC, producto_key ASC
+           ) AS posicion
+    FROM margen_q2
+),
+top5_q2 AS (
+    -- Solo los cinco primeros de cada región
+    SELECT region, producto_key, margen_q2, posicion
+    FROM ranking_q2
+    WHERE posicion <= 5
+)
+SELECT r.region                                   AS region,
+       r.posicion                                 AS posicion_top5,
+       r.producto_key                             AS producto_key,
+       p.nombre                                   AS nombre_producto,
+       q1.margen_q1                               AS margen_q1_2026,
+       r.margen_q2                                AS margen_q2_2026,
+       CASE WHEN q1.producto_key IS NULL
+            THEN NULL
+            ELSE r.margen_q2 - q1.margen_q1
+       END                                        AS variacion_absoluta,
+       CASE WHEN q1.producto_key IS NULL
+              OR q1.margen_q1 = 0
+            THEN NULL
+            ELSE ROUND((r.margen_q2 - q1.margen_q1) / q1.margen_q1 * 100, 2)
+       END                                        AS variacion_porcentual,
+       CASE WHEN q1.producto_key IS NULL
+            THEN 'SIN_DATOS_Q1'
+            ELSE 'CON_DATOS_Q1'
+       END                                        AS indicador_q1
+FROM top5_q2 r
+JOIN DIM_PRODUCTO p
+  ON p.producto_key = r.producto_key
+LEFT JOIN margen_q1 q1 
+  ON  q1.region       = r.region
+  AND q1.producto_key = r.producto_key
+ORDER BY r.region, r.posicion;
